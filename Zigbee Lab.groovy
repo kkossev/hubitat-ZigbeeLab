@@ -83,12 +83,6 @@ metadata {
         input (name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true)
         input (name: "txtEnable", type: "bool", title: "Enable description text logging", defaultValue: true)
         input (name: "rawCommands", type: "bool", title: "Send raw commands where applicable", defaultValue: false)
-        /*
-        if (autoPollingEnabled?.value==true) {
-            input (name: "pollingInterval", type: "number", title: "<b>Polling interval</b>, seconds", description: "<i>The time period when the smart plug will be polled for power, voltage and amperage readings. Recommended value is <b>60 seconds</b></i>", 
-                   range: "10..3600", defaultValue: 60)
-        }
-*/
     }
 }
 
@@ -130,6 +124,7 @@ void parse(String description) {
             parseZHAcommand(descMap)
         }
         else { //cluster specific
+            log.trace "$LAB isClusterSpecific = <b>true</b>!"
             switch (descMap.clusterId) {
                 case "0004": //group
                     processGroupCommand(descMap)
@@ -424,8 +419,8 @@ def parseZHAcommand( Map descMap) {
                 switch (descMap.clusterId) {
                     case "EF00" :     /// tuya specific
                         //log.warn "Tuya cluster read attribute response: code ${status} Attributte ${attrId} cluster ${descMap.clusterId} data ${descMap.data}"
-                        def attribute = getAttribute(descMap.data)
-                        def value = getAttributeValue(descMap.data)
+                        def attribute = getTuyaAttribute(descMap.data)
+                        def value = getTuyaAttributeValue(descMap.data)
                         //log.trace "attribute=${attribute} value=${value}"
                         def map = [:]
                         def cmd = descMap.data[0]+descMap.data[2]
@@ -492,46 +487,19 @@ def parseZHAcommand( Map descMap) {
                     default :
                         log.info "$LAB Received ZCL Default Response to Command ${descMap.data[0]} for cluster:${descMap.clusterId} , data=${descMap.data} (Status: ${descMap.data[1]=="00" ? 'Success' : '<b>Failure</b>'})"
                         break
+                } 
+                if (status == "82") {
+                    if (logEnable) log.warn "$LAB unsupported general command cluster:${descMap.clusterId}, command:${clusterCmd}"
                 }
-            }
+            }// status != "00"
             else {
+                log.trace "$LAB ZCL Command 0x0B Response Status 0x00"
             }
             break
         default :
             log.warn "$LAB Unprocessed global command: cluster=${descMap.clusterId} command=${descMap.command} attrId=${descMap.attrId} value=${descMap.value} data=${descMap.data}"
     }
 }
-
-/*
-private void processGlobalCommand(Map descMap) {
-
-
-                case "0B" ://command response
-                    status =  descMap.data[1]
-                    switch (descMap.clusterId) {
-
-                        case "0006" :
-                            break
-                        case "0008" :
-                            def cmd = clusterCmd=="01" ? "startLevelChange" : clusterCmd=="03" ? "stopLevelChange" : clusterCmd=="04" ? "move with on off" : clusterCmd=="00" ? "move" : "UNKNOWN"
-                            log.info "$LAB processGlobalCommand ${descMap.clusterId} (command response) clusterId: ${descMap.clusterId} clusterCmd: ${clusterCmd} ${cmd}"
-                            break
-                        case "E001" :    // Tuya
-                            log.info "$LAB processGlobalCommand ${descMap.clusterId} (command response) clusterId: ${descMap.clusterId} data:${descMap.data}"
-                            break
-                        default :
-                            if (txtEnable) log.warn "$LAB skipped GlobalCommand response cluster: ${descMap.clusterId} : ${descMap}"
-                    }
-                    if (status == "82") {
-                        if (logEnable) log.warn "$LAB unsupported general command cluster:${descMap.clusterId}, command:${clusterCmd}"
-                    }
-                    break
-                default :
-                    if (logEnable) log.warn "$LAB skipped global command cluster:${descMap.clusterId}, command:${descMap.command}, data:${descMap.data}"
-            }
-
-}
-*/
 
 
 def refresh() {
@@ -619,17 +587,6 @@ def energyEvent( energy ) {
     if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
 }
 
-
-def switchToSceneMode()
-{
-    zigbee.writeAttribute(0x0006, 0x8004, 0x30, 0x01)
-}
-
-def switchToDimmerMode()
-{
-     zigbee.writeAttribute(0x0006, 0x8004, 0x30, 0x00)   
-}
-
 def configureReporting(  ) {
     Integer endpointId = 1
     ArrayList<String> cmd = []
@@ -715,81 +672,6 @@ void sendZigbeeCommands(ArrayList<String> cmd) {
 }
 
 
-def parsePowerEnergy(String description) {
-    if (logEnable) {log.debug "$LAB description is $description"}
-    def event = zigbee.getEvent(description)
-
-    if (event) {
-        //log.info "$LAB event enter:$event"
-        setPresent()
-        if (event.name== "power") {
-            event.value = event.value/powerDiv
-            event.unit = "W"
-        } else if (event.name== "energy") {
-            event.value = event.value/energyDiv
-            event.unit = "kWh"
-        }
-        if (txtEnable) {log.info "$LAB ${event.name} = $event.value"} 
-        sendEvent(event)
-        if (event.name== "switch") {
-            //TODO: if switch changes previous state - refresh!
-            if (state.lastSwitchState != event.value ) {
-                if (logEnable) {log.trace "$LAB switch state changed from <b>${state.lastSwitchState}</b> to <b>${event.value}</b>"}
-                state.lastSwitchState = event.value
-            }
-        }
-    } else {
-        List result = []
-        def descMap = zigbee.parseDescriptionAsMap(description)
-        if (logEnable) {log.debug "$LAB Desc Map: $descMap"}
-
-        List attrData = [[cluster: descMap.cluster ,attrId: descMap.attrId, value: descMap.value]]
-        descMap.additionalAttrs.each {
-            attrData << [cluster: descMap.cluster, attrId: it.attrId, value: it.value]
-        }
-
-        attrData.each {
-                def map = [:]
-                if (it.value && it.cluster == "0B04" && it.attrId == "050B") {
-                        map.name = "power"
-                        map.value = zigbee.convertHexToInt(it.value)/powerDiv
-                        map.unit = "W"
-                        if (state.lastPower != map.value ) {
-                            if (logEnable) {log.trace "$LAB power changed from <b>${state.lastPower}</b> to <b>${map.value}</b>"}
-                            state.lastPower = map.value
-                        }
-                }
-                else if (it.value && it.cluster == "0B04" && it.attrId == "0505") {
-                        map.name = "voltage"
-                        map.value = zigbee.convertHexToInt(it.value)/powerDiv
-                        map.unit = "V"
-                }
-                else if (it.value && it.cluster == "0B04" && it.attrId == "0508") {
-                        map.name = "amperage"
-                        map.value = zigbee.convertHexToInt(it.value)/currentDiv
-                        map.unit = "A"
-                }
-                else if (it.value && it.cluster == "0702" && it.attrId == "0000") {
-                        map.name = "energy"
-                        map.value = zigbee.convertHexToInt(it.value)/energyDiv
-                        map.unit = "kWh"
-                }
-                else {
-                    //log.warn "$LAB ^^^^ UNRPOCESSED! ^^^^"
-                }
-
-                if (map) {
-                    if (txtEnable) {log.info "${map.name} = ${map.value} ${map.unit}"}
-                    result << createEvent(map)
-                }
-                if (logEnable) {log.debug "Parse returned $map"}
-        }
-        return result
-    }
-}
-
-
-
 private String getTuyaAttribute(ArrayList _data) {
     String retValue = ""
     if (_data.size() >= 5) {
@@ -817,57 +699,24 @@ private int getTuyaAttributeValue(ArrayList _data) {
     return retValue
 }
 
-/*
 def off() {
+    if (logEnable) {log.debug "Switching ${device.displayName} Off"}
     def cmds = zigbee.off()
-    if (device.getDataValue("model") == "HY0105") {
-        cmds += zigbee.command(zigbee.ONOFF_CLUSTER, 0x00, "", [destEndpoint: 0x02])
+    if (state.model == "TS0601") {
+        cmds = zigbee.command(0xEF00, 0x0, "00010101000100")
     }
     return cmds
 }
 
 def on() {
-    def cmds = zigbee.on()
-    if (device.getDataValue("model") == "HY0105") {
-        cmds += zigbee.command(zigbee.ONOFF_CLUSTER, 0x01, "", [destEndpoint: 0x02])
-    }
-    return cmds
-}
-*/
-
-def off() {
-/*    
-    if (alwaysOn == true) {
-        log.warn "AlwaysOn option for ${device.displayName} is enabled , the command to switch it OFF is ignored!"
-    }
-*/
-//    else {
-//        state.isDigital = true
-        if (logEnable) {log.debug "Switching ${device.displayName} Off"}
-        def cmds = zigbee.off()
-        if (state.model == "TS0601") {
-            cmds = zigbee.command(0xEF00, 0x0, "00010101000100")
-        }
-//        runInMillis( digitalTimer, isDigitalClear)
-        return cmds
- //   }
-}
-
-def on() {
-    //state.isDigital = true
     if (logEnable) {log.debug "Switching ${device.displayName} On"}
     def cmds = zigbee.on()
     if (state.model == "TS0601") {
         cmds = zigbee.command(0xEF00, 0x0, "00010101000101")
     }
-    //runInMillis( digitalTimer, isDigitalClear)
     return cmds
 }
 
-
-/**
- * PING is used by Device-Watch in attempt to reach the Device
- * */
 def ping() {
     return refresh()
 }
@@ -887,24 +736,6 @@ def powerRefresh() {
     cmds.each{
         sendHubCommand(new hubitat.device.HubMultiAction(delayBetween(cmds,200), hubitat.device.Protocol.ZIGBEE))
     }
-}
-
-/*
-
-def refresh() {
-    if (logEnable) {log.debug "refresh"}
-    poll()
-
-}
-*/
-
-def autoPoll() {
-    if (logEnable) {log.debug "autoPoll()"}
-    checkIfNotPresent()
-    if (autoPollingEnabled?.value==true) {
-        runIn( pollingInterval.value, autoPoll)
-    }
-    poll()    
 }
 
 // Called when preferences are saved
@@ -1061,17 +892,54 @@ def heRattr() {
 }
 
 
-
-
-
 def activeEndpoints() {
+/*    
     Map dummy = [:]
     ArrayList<String> cmd = []
     // example : https://community.hubitat.com/t/discover-zigbee-active-endpoints/44950/3?u=kkossev
     // ["he raw ${device.deviceNetworkId} 0 0 0x0005 {00 ${zigbee.swapOctets(device.deviceNetworkId)}} {0x0000}"] //get all the endpoints...
     cmd += "he raw ${device.deviceNetworkId} 0 0 0x0005 {00 ${zigbee.swapOctets(device.deviceNetworkId)}} {0x0000}"
     sendZigbeeCommands(cmd)
+*/    
+    
+    List<String> cmds = []
+    
+    cmds += ["he raw ${device.deviceNetworkId} 0 0 0x0005 {00 ${zigbee.swapOctets(device.deviceNetworkId)}} {0x0000}"] //get all the endpoints...
+    String endpointIdTemp = endpointId == null ? "01" : endpointId
+    cmds += ["he raw ${device.deviceNetworkId} 0 0 0x0004 {00 ${zigbee.swapOctets(device.deviceNetworkId)} $endpointIdTemp} {0x0000}"]
+    
+    return cmds    
 }
+
+def parseSimpleDescriptorResponse(Map descMap) {
+    //log.info "Received simple descriptor response, data=${descMap.data} (Sequence Number:${descMap.data[0]}, status:${descMap.data[1]}, lenght:${hubitat.helper.HexUtils.hexStringToInt(descMap.data[4])}"
+    log.info "Endpoint: ${descMap.data[5]} Application Device:${descMap.data[9]}${descMap.data[8]}, Application Version:${descMap.data[10]}"
+    def inputClusterCount = hubitat.helper.HexUtils.hexStringToInt(descMap.data[11])
+    def inputClusterList = ""
+    for (int i in 1..inputClusterCount) {
+        inputClusterList += descMap.data[13+(i-1)*2] + descMap.data[12+(i-1)*2] + ","
+    }
+    inputClusterList = inputClusterList.substring(0, inputClusterList.length() - 1)
+    log.info "Input Cluster Count: ${inputClusterCount} Input Cluster List : ${inputClusterList}"
+    if (getDataValue("inClusters") != inputClusterList)  {
+        log.warn "inClusters=${getDataValue('inClusters')} differs from inputClusterList:${inputClusterList} - will be updated!"
+        updateDataValue("inClusters", inputClusterList)
+    }
+    
+    def outputClusterCount = hubitat.helper.HexUtils.hexStringToInt(descMap.data[12+inputClusterCount*2])
+    def outputClusterList = ""
+    for (int i in 1..outputClusterCount) {
+        outputClusterList += descMap.data[14+inputClusterCount*2+(i-1)*2] + descMap.data[13+inputClusterCount*2+(i-1)*2] + ","
+    }
+    outputClusterList = outputClusterList.substring(0, outputClusterList.length() - 1)
+    log.info "Output Cluster Count: ${outputClusterCount} Output Cluster List : ${outputClusterList}"
+    if (getDataValue("outClusters") != outputClusterList)  {
+        log.warn "outClusters=${getDataValue('outClusters')} differs from outputClusterList:${outputClusterList} -  will be updated!"
+        updateDataValue("outClusters", outputClusterList)
+    }
+}
+
+
 
 
 def test()
@@ -1451,16 +1319,6 @@ private byte[] reverseArray(byte[] array) {
 }
 
 
-/* ================================= another TS004F model ????
-
-        fingerprint: [{modelID: 'TS004F', manufacturerName: '_TZ3000_pcqjmcud'}],
-        model: 'YSR-MINI-Z',
-        vendor: 'TuYa',
-        description: '2 in 1 Dimming remote control and scene control',
-
-*/
-
-
 /* ********************************** bookmarks  ************************
 
 https://community.smartthings.com/t/faq-zigbee-application-profiles-or-why-not-all-zigbee-devices-work-with-smartthings/76219
@@ -1483,10 +1341,6 @@ https://github.com/iharyadi/hubitat/blob/master/Environment%20SensorEx/Environme
 
 https://community.hubitat.com/t/is-zigbee-a-con-overpriced/21887/121?u=kkossev
 The second tuple in the raw description is the application profile, 0104 is zha, C05E is zll
-
-
-
-
 
 */
 
