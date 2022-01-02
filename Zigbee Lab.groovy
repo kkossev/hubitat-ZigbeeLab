@@ -18,7 +18,7 @@
  * ver. 1.0.2 2022-01-02 kkossev
  *
 */
-public static String version()	  { return "v1.0.1" }
+public static String version()	  { return "v1.0.2" }
 
 
 import hubitat.device.HubAction
@@ -108,7 +108,19 @@ void parse(String description) {
     Map descMap = zigbee.parseDescriptionAsMap(description)
     if (logEnable) log.debug "descMap:${descMap}"
     String status
-
+    def event = zigbee.getEvent(description)
+    if (event) {
+        parseEvent(event)
+        return null //event
+    }
+    
+    List result = []
+//    def descMap = zigbee.parseDescriptionAsMap(description)
+//    if (logEnable) {log.debug "Desc Map: $descMap"}
+    if (descMap.attrId != null ) {
+        parseAttributes(descMap)
+    }
+    
     if (descMap.clusterId != null && descMap.profileId == "0104") {
         if (descMap.isClusterSpecific == false) { //global commands
             processGlobalCommand(descMap)
@@ -126,47 +138,9 @@ void parse(String description) {
         }
         return
     ////////////////////////////////////////////////////////   zdo commands ////////////////////////////////////////////
-    } else if (descMap.profileId == "0000") { //zdo
-        switch (descMap.clusterId) {
-            case "8005" : //endpoint response
-                def endpointCount = descMap.data[4]
-                def endpointList = descMap.data[5]
-                log.info "zdo command: cluster: ${descMap.clusterId} (endpoint response) endpointCount = ${endpointCount}  endpointList = ${endpointList}"
-                break
-            case "8004" : //simple descriptor response
-                log.info "zdo command: cluster: ${descMap.clusterId} (simple descriptor response)"
-                break
-            case "8034" : //leave response
-                log.info "zdo command: cluster: ${descMap.clusterId} (leave response)"
-                break
-            case "8021" : //bind response
-                log.info "zdo command: cluster: ${descMap.clusterId} (bind response)"
-                break
-            case "8022" : //unbind request
-                log.info "zdo command: cluster: ${descMap.clusterId} (unbind request)"
-                break
-            case "0013" : //"device announce"
-                log.info "zdo command: cluster: ${descMap.clusterId} (device announce)"
-                if (logEnable) log.trace "device announce..."
-            /*
-                String currentState = device.currentValue("switch") ?: "on"
-                String opt = powerRestore ?: pwrRstOpts.defaultValue
-                List<String> cmds = configAttributeReporting()
-                if ((opt == "last" && currentState == "off") || (opt == "off")) {
-                    cmds.addAll(zigbee.off(0))
-                }
-                sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
-                String currentAddress = descMap.data[2] + descMap.data[1]
-                if (currentAddress != state.lastAddress) {
-                    if (txtEnable) log.info "address changed! new:${currentAddress}, old:${state.lastAddress}, checking group membership status..."
-                    state.lastAddress = currentAddress
-                    runIn(4,getGroups)
-                }
-*/
-                break
-            default :
-                if (logEnable) log.warn "skipped UNKNOWN zdo cluster: ${descMap.clusterId}"
-        }
+    } 
+    else if (descMap.profileId == "0000") { //zdo
+        parseZDOcommand(descMap)
         return
     }
 
@@ -176,43 +150,69 @@ void parse(String description) {
     parseAttributes(descMap.cluster, descMap.endpoint, additionalAttributes, descMap.command)
 }
 
-private void parseAttributes(String cluster, String endPoint, List<Map> additionalAttributes, String command){
+def parseEvent( event )
+{
+    if (logEnable==true) log.debug "Event enter: $event"
+    switch (event.name) {
+        case "switch" :
+            switchEvent( event.value )
+            break
+        // for smart plugs that can be configured to fire atimaticallty power and energy events ..
+        case "power" :    
+            powerEvent(event.value/powerDiv)
+            break
+        case "energy" :
+            energyEvent(event.value/energyDiv)
+            break
+        default :
+            if (txtEnable) {log.warn "received <b>unhandled event</b> ${event.name} = $event.value"} 
+            break
+    }
+}
+
+def parseAttributes(Map descMap) {
+            // attribute report received
+            List attrData = [[cluster: descMap.cluster ,attrId: descMap.attrId, value: descMap.value, status: descMap.status]]
+            descMap.additionalAttrs.each {
+                attrData << [cluster: descMap.cluster, attrId: it.attrId, value: it.value, status: it.status]
+            }
+            attrData.each {
+                parseSingleAttribute( it )
+/*                
+                def map = [:]
+                if (it.status == "86") {
+                    disableUnsupportedAttribute(descMap.cluster, it.attrId)
+                }
+                else if (it.value && it.cluster == "0B04" && it.attrId == "050B") {
+                        powerEvent(zigbee.convertHexToInt(it.value)/powerDiv)
+                        if (state.lastPower != zigbee.convertHexToInt(it.value)/powerDiv ) {
+                            if (logEnable) {log.trace "power changed from <b>${state.lastPower}</b> to <b>${zigbee.convertHexToInt(it.value)/powerDiv}</b>"}
+                            state.lastPower = zigbee.convertHexToInt(it.value)/powerDiv
+                        }
+                }
+                else if (it.value && it.cluster == "0B04" && it.attrId == "0505") {
+                        voltageEvent(zigbee.convertHexToInt(it.value)/powerDiv)
+                }
+                else if (it.value && it.cluster == "0B04" && it.attrId == "0508") {
+                        amperageEvent(zigbee.convertHexToInt(it.value)/currentDiv)
+                }
+                else if (it.value && it.cluster == "0702" && it.attrId == "0000") {
+                        energyEvent(zigbee.convertHexToInt(it.value)/energyDiv)
+                }
+                else {
+                    log.warn "Unprocessed attribute report: cluster=${descMap.clusterId} command=${descMap.command} attrId=${descMap.attrId} value=${descMap.value} data=${descMap.data}"
+                }
+                //if (logEnable) {log.debug "Parse returned $map"}
+*/
+            } // for each attribute    
+}
+
+private void parseSingleAttribute( Map it ) {
     //if (logEnable) log.warn "parseAttributes cluster:${cluster}"
     additionalAttributes.each{
         switch (cluster) {
             case "0000" :
-                switch (it.attrId) {
-                    case "0000" :
-                        log.info "parseAttributes: ZLC version: ${it.value}"        // default 0x03
-                        break
-                    case "0001" :
-                        log.info "parseAttributes: Applicaiton version: ${it.value}"    // For example, 0b 01 00 0001 = 1.0.1, where 0x41 is 1.0.1
-                        break                                                            // https://developer.tuya.com/en/docs/iot-device-dev/tuya-zigbee-lighting-dimmer-swith-access-standard?id=K9ik6zvlvbqyw 
-                    case "0002" : 
-                        log.info "parseAttributes: Stack version: ${it.value}"        // default 0x02
-                    case "0003" : 
-                        log.info "parseAttributes: HW version: ${it.value}"        // default 0x01
-                    case "0004" :
-                        log.info "parseAttributes: Manufacturer name: ${it.value}"
-                        break
-                    case "0005" :
-                        log.info "parseAttributes: Model Identifier: ${it.value}"
-                        break
-                    case "0007" :
-                        log.info "parseAttributes: Power Source: ${it.value}"        // enum8-0x30 default 0x03
-                        break
-                    case "4000" :    //software build
-                        updateDataValue("softwareBuild",it.value ?: "unknown")
-                        break
-                    case "FFFD" :    // Cluster Revision (Tuya specific)
-                        log.info "parseAttributes: Cluster Revision 0xFFFD: ${it.value}"    //uint16 -0x21 default 0x0001
-                        break
-                    case "FFFE" :    // Tuya specific
-                        log.info "parseAttributes: Tuya specific 0xFFFE: ${it.value}"
-                        break
-                    default :
-                        if (logEnable) log.warn "parseAttributes cluster:${cluster} UNKNOWN  attrId ${it.attrId} value:${it.value}"
-                }
+                parseBasicClusterAttribute( it )
                 break
             case "0001" :
                 log.warn "parseAttributes: cluster ${cluster}"
@@ -261,6 +261,81 @@ private void parseAttributes(String cluster, String endPoint, List<Map> addition
         }
     }
 }
+
+
+def parseBasicClusterAttribute( Map it ) {
+                switch (it.attrId) {
+                    case "0000" :
+                        log.info "parseAttributes: ZLC version: ${it.value}"        // default 0x03
+                        break
+                    case "0001" :
+                        log.info "parseAttributes: Applicaiton version: ${it.value}"    // For example, 0b 01 00 0001 = 1.0.1, where 0x41 is 1.0.1
+                        break                                                            // https://developer.tuya.com/en/docs/iot-device-dev/tuya-zigbee-lighting-dimmer-swith-access-standard?id=K9ik6zvlvbqyw 
+                    case "0002" : 
+                        log.info "parseAttributes: Stack version: ${it.value}"        // default 0x02
+                    case "0003" : 
+                        log.info "parseAttributes: HW version: ${it.value}"        // default 0x01
+                    case "0004" :
+                        log.info "parseAttributes: Manufacturer name: ${it.value}"
+                        break
+                    case "0005" :
+                        log.info "parseAttributes: Model Identifier: ${it.value}"
+                        break
+                    case "0007" :
+                        log.info "parseAttributes: Power Source: ${it.value}"        // enum8-0x30 default 0x03
+                        break
+                    case "4000" :    //software build
+                        updateDataValue("softwareBuild",it.value ?: "unknown")
+                        break
+                    case "FFFD" :    // Cluster Revision (Tuya specific)
+                        log.info "parseAttributes: Cluster Revision 0xFFFD: ${it.value}"    //uint16 -0x21 default 0x0001
+                        break
+                    case "FFFE" :    // Tuya specific
+                        log.info "parseAttributes: Tuya specific 0xFFFE: ${it.value}"
+                        break
+                    default :
+                        if (logEnable) log.warn "parseAttributes cluster:${cluster} UNKNOWN  attrId ${it.attrId} value:${it.value}"
+                }
+}
+
+
+
+
+
+def parseZDOcommand( Map descMap ) {
+    switch (descMap.clusterId) {
+        case "0006" :
+            log.info "Received match descriptor request, data=${descMap.data} (Sequence Number:${descMap.data[0]}, Input cluster count:${descMap.data[5]} Input cluster: 0x${descMap.data[7]+descMap.data[6]})"
+            break
+        case "0013" : // device announcement
+            log.info "Received device announcement, data=${descMap.data} (Sequence Number:${descMap.data[0]}, Device network ID: ${descMap.data[2]+descMap.data[1]}, Capability Information: ${descMap.data[11]})"
+            break
+        case "8004" : // simple descriptor response
+            log.info "Received simple descriptor response, data=${descMap.data} (Sequence Number:${descMap.data[0]}, status:${descMap.data[1]}, lenght:${hubitat.helper.HexUtils.hexStringToInt(descMap.data[4])}"
+            parseSimpleDescriptorResponse( descMap )
+            break
+        case "8005" : // endpoint response
+            def endpointCount = descMap.data[4]
+            def endpointList = descMap.data[5]
+            log.info "zdo command: cluster: ${descMap.clusterId} (endpoint response) endpointCount = ${endpointCount}  endpointList = ${endpointList}"
+            break
+        case "8021" : // bind response
+            log.info "Received bind response, data=${descMap.data} (Sequence Number:${descMap.data[0]}, Status: ${descMap.data[1]=="00" ? 'Success' : '<b>Failure</b>'})"
+            break
+        case "8022" : //unbind request
+            log.info "zdo command: cluster: ${descMap.clusterId} (unbind request)"
+            break
+        case "8034" : //leave response
+            log.info "zdo command: cluster: ${descMap.clusterId} (leave response)"
+            break
+        default :
+            log.warn "Unprocessed ZDO command: cluster=${descMap.clusterId} command=${descMap.command} attrId=${descMap.attrId} value=${descMap.value} data=${descMap.data}"
+    }
+}
+
+
+
+
 
 private void processGroupCommand(Map descMap) {
     String status = descMap.data[0]
