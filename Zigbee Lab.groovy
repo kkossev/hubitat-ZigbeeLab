@@ -52,31 +52,32 @@ metadata {
         //capability "SignalStrength"       // lqi - NUMBER; rssi - NUMBER
         //capability "PowerSource"          // powerSource - ENUM ["battery", "dc", "mains", "unknown"]
 
-    attribute   "driver", "string"
+        attribute   "driver", "string"
   
-    command "activeEndpoints"
-    command "zdoBind"
-    command "zdoUnbind"
-    command "raw"
-    command "zigbeeCommand"
-    command "heCr"
-    command "configureReporting"
-    command "resetReportingToFactoryDefaults"
+        command "activeEndpoints"
+        command "zdoBind"
+        command "zdoUnbind"
+        command "raw"
+        command "zigbeeCommand"
+        command "heCr"
+        command "configureReporting"
+        command "resetReportingToFactoryDefaults"
 // command "playSoundByName", [[name: "Sound Name", type: "STRING", description: "Sound object name"], [name: "Set Volume", type: "NUMBER", description: "Sets the volume before playing the message"],[name: "Restore Volume", type: "NUMBER", description: "Restores the volume after playing"]]
 //        command "playTellStory", [[name: "Set Volume", type: "NUMBER", description: "Sets the volume before playing the message"],[name: "Restore Volume", type: "NUMBER", description: "Restores the vo        
-    command "readAttribute", [[name: "Cluster", type: "STRING", description: "Zigbee Cluster (Hex)", defaultValue : "0001"], [name: "Attribute", type: "STRING", description: "Attribute (Hex)", defaultValue : "0002"]]
-    command "readAttributesTS004F"
-    command "heGrp"
-    command "test"
-    command "test2"
-    command "heCmd"
-    command "leaveAndRejoin"
-    command "enrollResponse"
-    command "getClusters"
-    command "zclGlobal"
+        command "readAttribute", [[name: "Cluster", type: "STRING", description: "Zigbee Cluster (Hex)", defaultValue : "0001"], [name: "Attribute", type: "STRING", description: "Attribute (Hex)", defaultValue : "0002"]]
+        command "readAttributesTS004F"
+        command "heGrp"
+        command "test"
+        command "test2"
+        command "heCmd"
+        command "leaveAndRejoin"
+        command "enrollResponse"
+        command "getClusters"
+        command "zclGlobal"
+        command "checkBattery"    // TODO!
 
       
- 	fingerprint inClusters: "0000,0001,0003,0004,0006,1000", outClusters: "0019,000A,0003,0004,0005,0006,0008,1000", manufacturer: "_ANY", model: "ANY", deviceJoinName: "Hubitat Zigbee Lab"
+ 	    fingerprint inClusters: "_ANY", outClusters: "_ANY", manufacturer: "_ANY", model: "_ANY", deviceJoinName: "Hubitat Zigbee Lab"
     }
     preferences {
         input (name: "traceEnable", type: "bool", title: "Enable trace logging", defaultValue: true)
@@ -101,11 +102,14 @@ metadata {
 // example : https://github.com/hubitat/HubitatPublic/blob/master/examples/drivers/advancedZigbeeCTbulb.groovy 
 //
 //parsers
-void parse(String description) {
+void parse(String description, rawStream = true) {
     Map descMap = zigbee.parseDescriptionAsMap(description)
     if (logEnable) log.debug "$LAB descMap:${descMap}\n\n"
+    log.trace "rawStream: ${description}"
     String status
     def event = zigbee.getEvent(description)
+    def zbc = zigbee.clusterLookup(descMap.clusterId!=null ? descMap.clusterId : descMap.clusterInt != null? descMap.clusterInt : 0)
+    //log.trace "zbc = $zbc ${zbc.clusterLabel} ${zbc.clusterInt}"    // zbc = POWER_CONFIGURATION_CLUSTER Power Configuration 1
     if (event) {
         parseEvent(event)
         return
@@ -124,20 +128,17 @@ void parse(String description) {
             parseZHAcommand(descMap)
         }
         else { //cluster specific
-            log.trace "$LAB isClusterSpecific = <b>true</b>!"
-            switch (descMap.clusterId) {
-                case "0004": //group
-                    processGroupCommand(descMap)
-                    break
-                case "0006": 
-                    log.info "$LAB cluster specific: ${descMap.clusterId} command: ${descMap.command}"
-                    break
-                default :
-                    if (logEnable) log.warn "$LAB skipped cluster specific command cluster:${descMap.clusterId}, command:${descMap.command}, data:${descMap.data}"
-            }
+            parseClusterSpecificCommand(descMap)
         }
         return
-    } 
+    }
+    else {
+        log.warn "$LAB <b>UNPROCESSED parse() !!!<\b>"
+    }
+}
+
+def eventStreamStatus(String message) {
+    log.warn "!!!!!!!!!!!!!!!!!!!!!!!!eventStreamStatus ${message}"
 }
 
 def parseEvent( event )
@@ -155,7 +156,8 @@ def parseEvent( event )
             energyEvent(event.value/energyDiv)
             break
         default :
-            if (txtEnable) {log.warn "$LAB received <b>unhandled event</b> ${event.name} = $event.value"} 
+            if (txtEnable) {log.info "$LAB ${device.displayName} ${event.name} is ${event.value}"}
+            sendEvent(event)        
             break
     }
 }
@@ -197,10 +199,10 @@ private void parseSingleAttribute( Map it, Map descMap ) {
                     */
                     case "8004" :        // Tuya TS004F
                         def mode = it.value=="00" ? "Dimmer" : it.value=="01" ? "Scene Switch" : "UNKNOWN " + it.value.ToString()
-                        if (logEnable) log.info "$LAB parseAttributes cluster:${cluster} attrId ${it.attrId} TS004F mode: ${mode}"
+                        if (logEnable) log.info "$LAB parseAttributes cluster:${it.cluster} attrId ${it.attrId} TS004F mode: ${mode}"
                         break
                     default :
-                        if (logEnable) log.warn "$LAB parseAttributes cluster:${cluster} UNKNOWN  attrId ${it.attrId} value:${it.value}"
+                        if (logEnable) log.warn "$LAB parseAttributes cluster:${it.cluster} UNKNOWN  attrId ${it.attrId} value:${it.value}"
             }
             break
         case "0008" :
@@ -351,6 +353,89 @@ def parseZDOcommand( Map descMap ) {
     }
 }
 
+def parseZHAcommand( Map descMap) {
+    switch (descMap.command) {
+        case "01" : //read attribute response. If there was no error, the successful attribute reading would be processed in the main parse() method!
+            def status = descMap.data[2]
+            def attrId = descMap.data[1] + descMap.data[0] 
+            if (status == "86") {
+                disableUnsupportedAttribute(descMap.clusterId, attrId)
+                log.trace "descMap = ${descMap}"
+            }
+            else {
+                processTuyaCluster(descMap)
+            }  //command is read attribute response
+            break
+        case "04" : //write attribute response
+            log.info "$LAB parseZHAcommand writeAttributeResponse cluster: ${descMap.clusterId} status:${descMap.data[0]}"
+            break
+        case "07" : // Configure Reporting Response
+            log.info "$LAB Received Configure Reporting Response for cluster:${descMap.clusterId} , data=${descMap.data} (Status: ${descMap.data[0]=="00" ? 'Success' : '<b>Failure</b>'})"
+            // Status: Unreportable Attribute (0x8c)
+            break
+        case "0B" : // ZCL Command Response
+            String clusterCmd = descMap.data[0]
+            def status = descMap.data[1]
+            if (status != "00") {
+                switch (descMap.clusterId) {
+                    case "0006" : // Switch state
+                        log.info "$LAB Switch state is not supported -> Switch polling must be disabled."
+                        //   log.info "$LAB processGlobalCommand ${descMap.clusterId} (command response) clusterId: ${descMap.clusterId} clusterCmd: ${clusterCmd}"
+                        break
+                    case "0B04" : // Electrical Measurement
+                        log.info "$LAB Electrical measurement is not supported -> Power, Voltage and Amperage polling must be disabled."
+                        break
+                    case "0300" :
+                        log.info "$LAB processGlobalCommand ${descMap.clusterId} (command response) clusterId: ${descMap.clusterId} status:${status}"
+                        break                    
+                    case "0702" : // Energy
+                        log.info "$LAB Energy measurement is not supported -> Energy polling must be disabled."
+                        break
+                    default :
+                        log.info "$LAB Received ZCL Default Response to Command ${descMap.data[0]} for cluster:${descMap.clusterId} , data=${descMap.data} (Status: ${descMap.data[1]=="00" ? 'Success' : '<b>Failure</b>'})"
+                        break
+                } 
+                if (status == "82") {
+                    if (logEnable) log.warn "$LAB unsupported general command cluster:${descMap.clusterId}, command:${clusterCmd}"
+                }
+            }// status != "00"
+            else {
+                log.trace "$LAB ZCL Command 0x0B Response Status 0x00"
+            }
+            break
+        default :
+            log.warn "$LAB Unprocessed global command: cluster=${descMap.clusterId} command=${descMap.command} attrId=${descMap.attrId} value=${descMap.value} data=${descMap.data}"
+    }
+}
+
+
+def parseClusterSpecificCommand(descMap) {
+    //log.trace "$LAB isClusterSpecific = <b>true</b>!"
+    def zbc = zigbee.clusterLookup(descMap.clusterId!=null ? descMap.clusterId : descMap.clusterInt != null? descMap.clusterInt : 0)
+    if (zbc != null) log.trace "$LAB Parsing Cluster Specific Command, cluster= ${zbc.clusterLabel} (${zbc.clusterInt}), command=${descMap.command}"    // zbc = POWER_CONFIGURATION_CLUSTER Power Configuration 1
+    else log.trace "$LAB Parsing Cluster Specific Command, cluster= ${ descMap.clusterId} (${descMap.clusterInt}), command=${descMap.command}"
+
+
+    switch (descMap.clusterId) {
+        case "0004": //group
+            processGroupCommand(descMap)
+            break
+        case "0006": 
+            if (descMap.command == "FD") {
+                log.info "$LAB Tuya button ${device.getDataValue("model")} keypress..."
+            }
+            else {
+                log.warn "$LAB cluster specific: ${descMap.clusterId} command: ${descMap.command} ???"
+            }
+            break
+        case "EF00" :
+            processTuyaCluster(descMap)
+            break
+        default :
+            if (logEnable) log.warn "$LAB <b>UNHANDLED</b> cluster specific command cluster:${descMap.clusterId}, command:${descMap.command}, data:${descMap.data}"
+    }
+}
+
 
 private void processGroupCommand(Map descMap) {
     String status = descMap.data[0]
@@ -406,100 +491,52 @@ private void processGroupCommand(Map descMap) {
 }
 
 
-def parseZHAcommand( Map descMap) {
-    switch (descMap.command) {
-        case "01" : //read attribute response. If there was no error, the successful attribute reading would be processed in the main parse() method.
-            def status = descMap.data[2]
-            def attrId = descMap.data[1] + descMap.data[0] 
-            if (status == "86") {
-                disableUnsupportedAttribute(descMap.clusterId, attrId)
-                log.trace "descMap = ${descMap}"
+
+def processTuyaCluster(descMap) {
+    log.trace "processing Tuya cluster..."
+    switch (descMap.clusterId) {
+        case "EF00" :     /// tuya specific
+            //log.warn "Tuya cluster read attribute response: code ${status} Attributte ${attrId} cluster ${descMap.clusterId} data ${descMap.data}"
+            def attribute = getTuyaAttribute(descMap.data)
+            def value = getTuyaAttributeValue(descMap.data)
+            //log.trace "attribute=${attribute} value=${value}"
+            def map = [:]
+            def cmd = descMap.data[0]+descMap.data[2]
+            switch (cmd) { // code : descMap.data[2]    ; attrId = descMap.data[1] + descMap.data[0] 
+                case "0001" : // switch
+                    switchEvent(value==0 ? "off" : "on")
+                    break
+                case "0011" : // Energy
+                    energyEvent(value/100)
+                    break
+                case "0012" : // Amperage
+                    amperageEvent(value/1000)
+                    break
+                case "0013" : // Power
+                    powerEvent(value/10)
+                    break
+                case "0014" : // Voltage
+                    voltageEvent(value/10)
+                    break
+                default :
+                    log.warn "$LAB Tuya unknown attribute: ${descMap.data[0]}${descMap.data[1]}${descMap.data[2]}${descMap.data[3]}${descMap.data[4]} data.size() = ${descMap.data.size()} value: ${value}}"
+                    log.warn "$LAB map= ${descMap}"
+                    break
             }
-            else {
-                switch (descMap.clusterId) {
-                    case "EF00" :     /// tuya specific
-                        //log.warn "Tuya cluster read attribute response: code ${status} Attributte ${attrId} cluster ${descMap.clusterId} data ${descMap.data}"
-                        def attribute = getTuyaAttribute(descMap.data)
-                        def value = getTuyaAttributeValue(descMap.data)
-                        //log.trace "attribute=${attribute} value=${value}"
-                        def map = [:]
-                        def cmd = descMap.data[0]+descMap.data[2]
-                        switch (cmd) { // code : descMap.data[2]    ; attrId = descMap.data[1] + descMap.data[0] 
-                            case "0001" : // switch
-                                switchEvent(value==0 ? "off" : "on")
-                                break
-                            case "0011" : // Energy
-                                energyEvent(value/100)
-                                break
-                            case "0012" : // Amperage
-                                amperageEvent(value/1000)
-                                break
-                            case "0013" : // Power
-                                powerEvent(value/10)
-                                break
-                            case "0014" : // Voltage
-                                voltageEvent(value/10)
-                                break
-                            default :
-                                log.warn "$LAB Tuya unknown attribute: ${descMap.data[0]}${descMap.data[1]}${descMap.data[2]}${descMap.data[3]}${descMap.data[4]} data.size() = ${descMap.data.size()} value: ${value}}"
-                                log.warn "$LAB map= ${descMap}"
-                                break
-                        }
-                        break
-                    case "E001" : /// tuya specific
-                        log.info "$LAB parseZHAcommand Tuya specific ${descMap.clusterId} (read attribute response) clusterId: ${descMap.clusterId} data:${descMap.data}"
-                        break
-                        default :
-                        log.warn "$LAB parseZHAcommand ${descMap.clusterId} (read attribute response) UNKNOWN clusterId: ${descMap.clusterId} data:${descMap.data}"
-                        def hexValue = descMap.data[1] + descMap.data[0] 
-                        if (status == "86") {
-                            log.warn "$LAB Unsupported Attributte ${hexValue}"
-                        }
-                        break
-                } // switch (descMap.clusterId)
-            }  //command is read attribute response
             break
-        case "04" : //write attribute response
-            log.info "$LAB parseZHAcommand writeAttributeResponse cluster: ${descMap.clusterId} status:${descMap.data[0]}"
-            break
-        case "07" : // Configure Reporting Response
-            log.info "$LAB Received Configure Reporting Response for cluster:${descMap.clusterId} , data=${descMap.data} (Status: ${descMap.data[0]=="00" ? 'Success' : '<b>Failure</b>'})"
-            // Status: Unreportable Attribute (0x8c)
-            break
-        case "0B" : // ZCL Command Response
-            String clusterCmd = descMap.data[0]
-            def status = descMap.data[1]
-            if (status != "00") {
-                switch (descMap.clusterId) {
-                    case "0006" : // Switch state
-                        log.info "$LAB Switch state is not supported -> Switch polling must be disabled."
-                        //   log.info "$LAB processGlobalCommand ${descMap.clusterId} (command response) clusterId: ${descMap.clusterId} clusterCmd: ${clusterCmd}"
-                        break
-                    case "0B04" : // Electrical Measurement
-                        log.info "$LAB Electrical measurement is not supported -> Power, Voltage and Amperage polling must be disabled."
-                        break
-                    case "0300" :
-                        log.info "$LAB processGlobalCommand ${descMap.clusterId} (command response) clusterId: ${descMap.clusterId} status:${status}"
-                        break                    
-                    case "0702" : // Energy
-                        log.info "$LAB Energy measurement is not supported -> Energy polling must be disabled."
-                        break
-                    default :
-                        log.info "$LAB Received ZCL Default Response to Command ${descMap.data[0]} for cluster:${descMap.clusterId} , data=${descMap.data} (Status: ${descMap.data[1]=="00" ? 'Success' : '<b>Failure</b>'})"
-                        break
-                } 
-                if (status == "82") {
-                    if (logEnable) log.warn "$LAB unsupported general command cluster:${descMap.clusterId}, command:${clusterCmd}"
-                }
-            }// status != "00"
-            else {
-                log.trace "$LAB ZCL Command 0x0B Response Status 0x00"
-            }
+        case "E001" : /// tuya specific
+            log.info "$LAB parseZHAcommand Tuya specific ${descMap.clusterId} (read attribute response) clusterId: ${descMap.clusterId} data:${descMap.data}"
             break
         default :
-            log.warn "$LAB Unprocessed global command: cluster=${descMap.clusterId} command=${descMap.command} attrId=${descMap.attrId} value=${descMap.value} data=${descMap.data}"
-    }
+            log.warn "$LAB parseZHAcommand ${descMap.clusterId} (read attribute response) UNKNOWN clusterId: ${descMap.clusterId} data:${descMap.data}"
+            def hexValue = descMap.data[1] + descMap.data[0] 
+            if (status == "86") {
+                log.warn "$LAB Unsupported Attributte ${hexValue}"
+            }
+            break
+    } // switch (descMap.clusterId)    
 }
+
 
 
 def refresh() {
@@ -891,6 +928,13 @@ def heRattr() {
     //    ^^^^^^^^^^^check if working? 
 }
 
+def checkBattery() {
+    ArrayList<String> cmd = []
+    //cmd += zigbee.readAttribute(0x0001, [0x0020, 0x0021], [:], delay=50)    // Battery voltage + Battery Percentage Remaining  !! TS0041 does not accept this format !!
+    cmd += zigbee.readAttribute(0x0001, 0x0020)
+    cmd += zigbee.readAttribute(0x0001, 0x0021)
+    sendZigbeeCommands(cmd)    
+}
 
 def activeEndpoints() {
 /*    
