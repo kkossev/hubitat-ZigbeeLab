@@ -105,7 +105,7 @@ metadata {
 void parse(String description, rawStream = true) {
     Map descMap = zigbee.parseDescriptionAsMap(description)
     if (logEnable) log.debug "$LAB descMap:${descMap}\n\n"
-    log.trace "rawStream: ${description}"
+    //log.trace "rawStream: ${description}"
     String status
     def event = zigbee.getEvent(description)
     def zbc = zigbee.clusterLookup(descMap.clusterId!=null ? descMap.clusterId : descMap.clusterInt != null? descMap.clusterInt : 0)
@@ -412,8 +412,8 @@ def parseZHAcommand( Map descMap) {
 def parseClusterSpecificCommand(descMap) {
     //log.trace "$LAB isClusterSpecific = <b>true</b>!"
     def zbc = zigbee.clusterLookup(descMap.clusterId!=null ? descMap.clusterId : descMap.clusterInt != null? descMap.clusterInt : 0)
-    if (zbc != null) log.trace "$LAB Parsing Cluster Specific Command, cluster= ${zbc.clusterLabel} (${zbc.clusterInt}), command=${descMap.command}"    // zbc = POWER_CONFIGURATION_CLUSTER Power Configuration 1
-    else log.trace "$LAB Parsing Cluster Specific Command, cluster= ${ descMap.clusterId} (${descMap.clusterInt}), command=${descMap.command}"
+    //if (zbc != null) log.trace "$LAB Parsing Cluster Specific Command, cluster= ${zbc.clusterLabel} (${zbc.clusterInt}), command=${descMap.command}"    // zbc = POWER_CONFIGURATION_CLUSTER Power Configuration 1
+   // else log.trace "$LAB Parsing Cluster Specific Command, cluster= ${ descMap.clusterId} (${descMap.clusterInt}), command=${descMap.command}"
 
 
     switch (descMap.clusterId) {
@@ -506,6 +506,12 @@ def processTuyaCluster(descMap) {
                 case "0001" : // switch
                     switchEvent(value==0 ? "off" : "on")
                     break
+                case "0002" :  // Mode 0=Auto   TODO - does not work consistently !!
+                    log.info "$LAB Tuya TRV mode (${value}) is ${value==0 ? 'Manual' : 'Auto'} "
+                    break
+                case "0010" : // Setpoint
+                    setpointEvent(value)
+                    break
                 case "0011" : // Energy
                     energyEvent(value/100)
                     break
@@ -517,6 +523,13 @@ def processTuyaCluster(descMap) {
                     break
                 case "0014" : // Voltage
                     voltageEvent(value/10)
+                    break
+                case "0065" :
+                case "0018" : // Temperature
+                    temperatureEvent(value)
+                    break
+                case "0024" : // Tuya TRV relay / heater TODO - does not work consistently !!
+                    log.info "$LAB Tuya TRV <b>heater relay</b> (${value}) is ${value==0 ? 'On' : 'Off'} "
                     break
                 default :
                     log.warn "$LAB Tuya unknown attribute: ${descMap.data[0]}${descMap.data[1]}${descMap.data[2]}${descMap.data[3]}${descMap.data[4]} data.size() = ${descMap.data.size()} value: ${value}}"
@@ -623,6 +636,24 @@ def energyEvent( energy ) {
     map.unit = "kWh"
     if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
 }
+
+def temperatureEvent( temperature ) {
+    def map = [:] 
+    map.name = "temperature"
+    map.value = temperature
+    map.unit = "C"    // TODO!
+    if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
+}
+
+def setpointEvent( setpoint ) {
+    def map = [:] 
+    map.name = "setpoint"
+    map.value = setpoint
+    map.unit = "C"    // TODO!
+    if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
+}
+
+
 
 def configureReporting(  ) {
     Integer endpointId = 1
