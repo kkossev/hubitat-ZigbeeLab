@@ -15,7 +15,7 @@
  * 
  * ver. 1.0.0 2021-10-24 kkossev  - first dummy version
  * ver. 1.0.1 2021-11-18 kkossev  - even more messy stuff
- * ver. 1.0.2 2022-01-02 kkossev
+ * ver. 1.0.2 2022-01-03 kkossev
  *
 */
 public static String version()	  { return "v1.0.2" }
@@ -51,6 +51,12 @@ metadata {
         capability "Polling"              // poll()
         //capability "SignalStrength"       // lqi - NUMBER; rssi - NUMBER
         //capability "PowerSource"          // powerSource - ENUM ["battery", "dc", "mains", "unknown"]
+        capability "Battery"
+        capability "TemperatureMeasurement"        
+        capability "RelativeHumidityMeasurement"
+        capability "IlluminanceMeasurement"
+        capability "CarbonDioxideMeasurement"
+        
 
         attribute   "driver", "string"
   
@@ -102,7 +108,7 @@ metadata {
 // example : https://github.com/hubitat/HubitatPublic/blob/master/examples/drivers/advancedZigbeeCTbulb.groovy 
 //
 //parsers
-void parse(String description, rawStream = true) {
+void parse(String description) {
     Map descMap = zigbee.parseDescriptionAsMap(description)
     if (logEnable) log.debug "$LAB descMap:${descMap}\n\n"
     //log.trace "rawStream: ${description}"
@@ -239,6 +245,9 @@ private void parseSingleAttribute( Map it, Map descMap ) {
                 amperageEvent(zigbee.convertHexToInt(it.value)/currentDiv)
             }        
             else log.warn "$LAB unprocessed cluster: $it.cluster attribute: $it.attrId "
+            break
+        case "EF00" : // Tuya cluster
+            log.warn "$LAB NOT PROCESSED Tuya Cluster EF00 attribute ${it.attrId}\n descMap = ${descMap}"
             break
         default :
             if (logEnable) {
@@ -493,7 +502,7 @@ private void processGroupCommand(Map descMap) {
 
 
 def processTuyaCluster(descMap) {
-    log.trace "processing Tuya cluster..."
+    //log.trace "processing Tuya cluster..."
     switch (descMap.clusterId) {
         case "EF00" :     /// tuya specific
             //log.warn "Tuya cluster read attribute response: code ${status} Attributte ${attrId} cluster ${descMap.clusterId} data ${descMap.data}"
@@ -501,38 +510,88 @@ def processTuyaCluster(descMap) {
             def value = getTuyaAttributeValue(descMap.data)
             //log.trace "attribute=${attribute} value=${value}"
             def map = [:]
-            def cmd = descMap.data[0]+descMap.data[2]
+            def cmd = /*descMap.data[0]+*/descMap.data[2]
             switch (cmd) { // code : descMap.data[2]    ; attrId = descMap.data[1] + descMap.data[0] 
-                case "0001" : // switch
-                    switchEvent(value==0 ? "off" : "on")
+                // case "01" : // 0701010100 data.size() = 7 value: 1} - after power on
+                case "01" : // switch
+                    if (descMap.data.size()<=7) {
+                        switchEvent(value==0 ? "off" : "on")
+                    }
+                    else {    // temperature  (TODO: check why is not sent automatically, but requires wake button press ... )
+                        temperatureEvent(value/10.0)                    }                
                     break
-                case "0002" :  // Mode 0=Auto   TODO - does not work consistently !!
-                    log.info "$LAB Tuya TRV mode (${value}) is ${value==0 ? 'Manual' : 'Auto'} "
+                case "02" :  // Mode; 0701020400 data.size() = 7 value: 1} - after power on
+                    if (descMap.data.size()<=7)
+                    {
+                        log.info "$LAB Tuya TRV mode (${value}) is ${value==0 ? 'Manual' : 'Auto'} "
+                    }
+                    else {    // humidity 
+                        //log.info "$LAB Tuya Humidity is ${value} %"
+                        humidityEvent(value)
+                    }
                     break
-                case "0010" : // Setpoint
+                //case "03" :  // Indicates if the Schedule mode is On or Off, "00" = ScheduleMode Off
+                   // break
+                //case "09" : // Countdown
+                    // break
+                // case 0755100200 data.size() = 10 value: 30} - after power on
+                case "10" : // Setpoint
                     setpointEvent(value)
                     break
-                case "0011" : // Energy
-                    energyEvent(value/100)
+                case "11" : // Energy
+                    energyEvent(value/100)    // or /10 ???
                     break
-                case "0012" : // Amperage
+                case "12" : // Amperage    // could be also Temperature for the Air sensor?
                     amperageEvent(value/1000)
                     break
-                case "0013" : // Power
+                case "13" : // Power    // could be also carbon dioxide for the Air sensor?
                     powerEvent(value/10)
                     break
-                case "0014" : // Voltage
+                case "14" : // Voltage
                     voltageEvent(value/10)
                     break
-                case "0065" :
-                case "0018" : // Temperature
+                //case "15" : // formaldehyde for the Air sensor
+                //    break
+                //case "16" :    // case "16": // VOC
+                    break
+                case "65" :    // ??
+                case "18" : // Temperature    //case "0718" ::
                     temperatureEvent(value)
                     break
-                case "0024" : // Tuya TRV relay / heater TODO - does not work consistently !!
+                case "24" : // Tuya TRV heating state (inverted state)
                     log.info "$LAB Tuya TRV <b>heater relay</b> (${value}) is ${value==0 ? 'On' : 'Off'} "
                     break
+               // case "0E" : // # tuya_switch_relay_status
+                //    break
+                //case "0F" : // # Led Indicator
+                // break
+                // case "28" :  case "001D" : // Child Lock
+                //break
+                // case "2B" : // sensor mode
+/*  after power ON :
+0003nullnullnull data.size() = 2 value: 0}
+ 
+07556C0000 data.size() = 30 value: 404095046}; Sata:[07, 55, 6C, 00, 00, 18, 06, 00, 28, 08, 00, 1C, 0B, 1E, 32, 0C, 1E, 32, 11, 00, 18, 16, 00, 46, 08, 00, 50, 17, 00, 3C]]
+
+unknown attribute: 07552D0500 data.size() = 7 value: 0}
+unknown attribute: 000480nullnull data.size() = 3 value: 0}
+Tuya unknown attribute: 0000nullnullnull data.size() = 2 value: 0}
+*/
+                
+/*
+        "ToDevice": {
+            "Switch": 0x01,  # Ok On / Off
+            "ManualMode": 0x02,  # ????
+            "ScheduleMode": 0x03,  # 01 Manual, 00 Schedule
+            "SetPoint": 0x10,  # Ok
+            "ChildLock": 0x28,
+            "SensorMode": 0x2B,
+        },
+*/
+
+                
                 default :
-                    log.warn "$LAB Tuya unknown attribute: ${descMap.data[0]}${descMap.data[1]}${descMap.data[2]}${descMap.data[3]}${descMap.data[4]} data.size() = ${descMap.data.size()} value: ${value}}"
+                    log.warn "$LAB Tuya unknown DP <b>${cmd}</b>: ${descMap.data[0]}${descMap.data[1]}${descMap.data[2]}${descMap.data[3]}${descMap.data[4]} data.size() = ${descMap.data.size()} value: ${value}}"
                     log.warn "$LAB map= ${descMap}"
                     break
             }
@@ -601,6 +660,7 @@ def switchEvent( value ) {
     map.value = value
     map.descriptionText = "${device.displayName} switch is ${value}"
     if (txtEnable) {log.info "$LAB ${map.descriptionText}"}
+    sendEvent(map)
 }
 
 def voltageEvent( voltage ) {
@@ -609,6 +669,7 @@ def voltageEvent( voltage ) {
     map.value = voltage
     map.unit = "V"
     if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
+    sendEvent(map)
 }
 
 def powerEvent( power ) {
@@ -635,6 +696,7 @@ def energyEvent( energy ) {
     map.value = energy
     map.unit = "kWh"
     if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
+    sendEvent(map)
 }
 
 def temperatureEvent( temperature ) {
@@ -643,7 +705,19 @@ def temperatureEvent( temperature ) {
     map.value = temperature
     map.unit = "C"    // TODO!
     if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
+    sendEvent(map)
 }
+
+def humidityEvent( humidity ) {
+    def map = [:] 
+    map.name = "humidity"
+    map.value = humidity
+    map.unit = "%"    // TODO!
+    if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
+    sendEvent(map)
+}
+
+
 
 def setpointEvent( setpoint ) {
     def map = [:] 
@@ -651,6 +725,7 @@ def setpointEvent( setpoint ) {
     map.value = setpoint
     map.unit = "C"    // TODO!
     if (txtEnable) {log.info "$LAB ${device.displayName} ${map.name} is ${map.value} ${map.unit}"}
+    sendEvent(map)
 }
 
 
